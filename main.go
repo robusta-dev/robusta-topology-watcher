@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"go.uber.org/zap"
+	. "go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"os"
 	"os/signal"
@@ -32,8 +32,8 @@ func createKubernetesConfig() (*rest.Config, error) {
 	return config, err
 }
 
-func createRootLogger() (*zap.SugaredLogger, error) {
-	config := zap.NewDevelopmentConfig()
+func createRootLogger() (*SugaredLogger, error) {
+	config := NewDevelopmentConfig()
 	config.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 	logger, err := config.Build()
 	if err != nil {
@@ -48,37 +48,49 @@ func main() {
 		fmt.Printf("error creating logger! %v", err)
 		return
 	}
-	defer func(logger *zap.SugaredLogger) {
-		err := logger.Sync()
-		if err != nil {
-			fmt.Printf("error calling sync on logger! %v", err)
-		}
+	defer func(logger *SugaredLogger) {
+		// ignore errors - see https://github.com/uber-go/zap/issues/880
+		_ = logger.Sync()
 	}(logger)
 
 	cfg, err := createKubernetesConfig()
 	if err != nil {
-		logger.With("error", err).Fatal("could not create kubernetes config")
+		logger.Fatal("could not create kubernetes config", Error(err))
 	}
 
 	watcher, err := NewWatcher(cfg, logger)
 	if err != nil {
-		logger.With("error", err).Fatal("could not create watcher")
+		logger.Fatal("could not create watcher", Error(err))
 	}
 
-	webhook := NewWebhookHandler(logger)
-	// TODO: this isn't ideal... when we have an error listing a specific type we find out only later
-	err = watcher.AddHandler(webhook, []string{
+	// TODO: fix url
+	//webhook := NewWebhookHandler(logger, "http://127.0.0.1")
+	//err = watcher.AddHandler(webhook, []string{
+	//	"deployments.v1.apps",
+	//	"events.v1.events.k8s.io",
+	//})
+	//if err != nil {
+	//	logger.Fatal("could not add webhook listener", Error(err))
+	//}
+	//
+
+	cache := NewCacheHandler(logger)
+	cache.Start()
+	defer cache.Stop()
+
+	err = watcher.AddHandler(cache, []string{
 		"deployments.v1.apps",
 		"events.v1.events.k8s.io",
+		"pods.v1.", // we need the trailing dot to signify that this is in the "" group
 	})
 	if err != nil {
-		logger.With("error", err).Fatal("could not add webhook listener")
+		logger.Fatal("could not add cache listener", Error(err))
 	}
+
 	watcher.Start()
 
 	sigCh := make(chan os.Signal, 0)
 	signal.Notify(sigCh, os.Kill, os.Interrupt)
 	<- sigCh
-
 	watcher.Stop()
 }
